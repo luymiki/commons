@@ -10,6 +10,7 @@ com\anluy\commons\dao\BaseDAO.class
 com\anluy\commons\utils\ListUtil.class
 com\anluy\commons\utils\StrUtil.class
 com\anluy\commons\utils\ClassUtil.class
+com\anluy\commons\elasticsearch\ElasticsearchRestClient$4.class
 com\anluy\commons\utils\RangeSplitUtil.class
 com\anluy\commons\elasticsearch\ElasticsearchRestClient$3.class
 com\anluy\commons\utils\RetryUtil$1.class

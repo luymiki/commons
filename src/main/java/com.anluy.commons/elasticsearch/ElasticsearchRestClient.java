@@ -30,6 +30,8 @@ import org.apache.http.HttpStatus;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
+import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.message.BasicHeader;
 import org.apache.http.nio.entity.NStringEntity;
 import org.elasticsearch.client.Response;
@@ -60,9 +62,16 @@ public class ElasticsearchRestClient {
     public ElasticsearchRestClient(String host, int port, String userName, String password) {
         this.restClient = this.createRestClient(host, port, userName, password);
     }
+    public ElasticsearchRestClient(HttpHost[] httpHosts, String userName, String password) {
+        this.restClient = this.createRestClient(httpHosts, userName, password);
+    }
 
     private RestClient createRestClient(String host, int port, String userName, String password) {
-        RestClientBuilder builder = RestClient.builder(new HttpHost(host, port, "http"));
+        return createRestClient(new HttpHost[]{new HttpHost(host, port, "http")},userName,password);
+    }
+
+    private RestClient createRestClient(HttpHost[] httpHosts, String userName, String password) {
+        RestClientBuilder builder = RestClient.builder(httpHosts);
         Header[] defaultHeaders = new Header[]{new BasicHeader("header", "value")};
         builder.setDefaultHeaders(defaultHeaders);
         builder.setMaxRetryTimeoutMillis(100000);
@@ -75,7 +84,19 @@ public class ElasticsearchRestClient {
         builder.setRequestConfigCallback(new RestClientBuilder.RequestConfigCallback() {
             @Override
             public RequestConfig.Builder customizeRequestConfig(RequestConfig.Builder requestConfigBuilder) {
-                return requestConfigBuilder.setSocketTimeout(60000).setConnectTimeout(50000);
+                return requestConfigBuilder.setSocketTimeout(5*60000)
+                        .setConnectTimeout(5*60000)
+                        .setConnectionRequestTimeout(5*60000);
+            }
+        });
+        builder.setHttpClientConfigCallback(new RestClientBuilder.HttpClientConfigCallback() {
+            @Override
+            public HttpAsyncClientBuilder customizeHttpClient(HttpAsyncClientBuilder httpAsyncClientBuilder) {
+                return httpAsyncClientBuilder.setDefaultIOReactorConfig(IOReactorConfig.custom()
+                        .setIoThreadCount(50)
+                        .setConnectTimeout(5*60000)
+//                        .setSoKeepAlive(true)
+                        .build());
             }
         });
         return builder.build();
@@ -385,6 +406,16 @@ public class ElasticsearchRestClient {
      * @return
      */
     public void batchSave(List<Map> recordDataList, String indexName) {
+        batchSave(recordDataList,indexName,true);
+    }
+    /**
+     * 批量保存 index指令：文档存在则更新、否则创建新的文档
+     *
+     * @param recordDataList 文档记录集
+     * @param indexName      索引名
+     * @return
+     */
+    public void batchSave(List<Map> recordDataList, String indexName,boolean refresh) {
         Assert.notEmpty(recordDataList, "recordDataList不能为空！");
         Assert.hasText(indexName, "indexName 不能为空！");
         try {
@@ -426,7 +457,9 @@ public class ElasticsearchRestClient {
                     LOGGER.error(String.format("批量保存操作完成，总记录数：{%s}，成功：{%s}，失败：{%s}，response：{%s}", total, success, failure, errorItems.toString()));
                     throw new ElasticsearchException("批量保存操作失败！");
                 }
-                refresh(indexName);
+                if(refresh){
+                    refresh(indexName);
+                }
             }
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("\npost done. ResponseData:\n" + resultStr);
@@ -446,6 +479,16 @@ public class ElasticsearchRestClient {
      * @return
      */
     public void batchUpdate(List<Map> recordDataList, String indexName) {
+        batchUpdate(recordDataList,indexName,true);
+    }
+    /**
+     * 批量更新 update指令：文档存在则更新、否则报异常，单个文档失败不影响整个批量操作
+     *
+     * @param recordDataList 文档记录集
+     * @param indexName      索引名
+     * @return
+     */
+    public void batchUpdate(List<Map> recordDataList, String indexName,boolean refresh) {
         Assert.notEmpty(recordDataList, "recordDataList不能为空！");
         Assert.hasText(indexName, "indexName 不能为空！");
         try {
@@ -487,7 +530,9 @@ public class ElasticsearchRestClient {
                     LOGGER.error(String.format("批量更新操作完成，总记录数：{%s}，成功：{%s}，失败：{%s}，response：{%s}", total, success, failure, errorItems.toString()));
                     throw new ElasticsearchException("批量更新操作失败！");
                 }
-                refresh(indexName);
+                if(refresh){
+                    refresh(indexName);
+                }
             }
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("\npost done. ResponseData:\n" + resultStr);
@@ -585,21 +630,22 @@ public class ElasticsearchRestClient {
      * @throws IOException
      */
     public void scroll(String dslStatement, String timeWindow, TimeWindowCallBack timeWindowCallBack, String indexName, String includeFields, String excludeFields) throws IOException {
-       this.scrollSource(dslStatement, timeWindow, new TimeWindowCallBack() {
-           @Override
-           public void process(List<Map> tmpDataList) {
-               List<Map> dataList = new ArrayList<>(tmpDataList.size());
-               tmpDataList.forEach(map -> {
-                   Map record = (Map) map.get("_source");
-                   String id = (String) map.get("_id");
-                   record.put("_id", id);
-                   dataList.add(record);
-               });
-               //回调接口处理时间窗口返回的数据
-               timeWindowCallBack.process(dataList);
-           }
-       },indexName,includeFields,excludeFields);
+        this.scrollSource(dslStatement, timeWindow, new TimeWindowCallBack() {
+            @Override
+            public void process(List<Map> tmpDataList) {
+                List<Map> dataList = new ArrayList<>(tmpDataList.size());
+                tmpDataList.forEach(map -> {
+                    Map record = (Map) map.get("_source");
+                    String id = (String) map.get("_id");
+                    record.put("_id", id);
+                    dataList.add(record);
+                });
+                //回调接口处理时间窗口返回的数据
+                timeWindowCallBack.process(dataList);
+            }
+        }, indexName, includeFields, excludeFields);
     }
+
     /**
      * 读取大结果集的scroll方法
      *
@@ -791,6 +837,30 @@ public class ElasticsearchRestClient {
             group.put(groupName, value);
         });
         return group;
+    }
+
+    /**
+     * 根据ID获取对应的文档记录
+     *
+     * @param restfulUri uri
+     * @return
+     * @throws IOException
+     */
+    public JSONObject get(String restfulUri) {
+        Assert.hasText(restfulUri, "restUri 不能为空！");
+        String url = restfulUri.startsWith("/") ? restfulUri : "/" + restfulUri;
+        try {
+            Response response = restClient.performRequest("GET", url);
+            String resultStr = this.parser(response);
+            JSONObject rj = JSONObject.parseObject(resultStr);
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("\nget done. ResponseData:\n" + resultStr);
+            }
+            return rj;
+        } catch (Exception e) {
+            LOGGER.error("查找失败！", e);
+            throw new ElasticsearchException("查找失败！", e);
+        }
     }
 
     /**
